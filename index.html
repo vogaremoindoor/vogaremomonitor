@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>PM5 BLE Teste</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #ffffff; --fg: #15171a; --muted: #6b7280;
+    --accent: #0a66c2; --ok: #15803d; --err: #b91c1c; --border: #e5e7eb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1013; --card: #171a1f; --fg: #f1f3f5; --muted: #9aa3ad;
+      --accent: #4ea1ff; --ok: #4ade80; --err: #f87171; --border: #262a31;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom));
+  }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+  h1 { font-size: 20px; margin: 0; }
+  #status { font-size: 14px; color: var(--muted); }
+  #status.ok { color: var(--ok); } #status.err { color: var(--err); }
+  .buttons { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+  button {
+    flex: 1 1 auto; padding: 12px 16px; font-size: 16px; font-weight: 600;
+    border: 0; border-radius: 10px; background: var(--accent); color: #fff;
+  }
+  button.secondary { background: var(--card); color: var(--fg); border: 1px solid var(--border); }
+  button:disabled { opacity: .4; }
+  .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  @media (min-width: 640px) { .grid { grid-template-columns: repeat(4, 1fr); } }
+  .tile { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 12px; }
+  .tile.big { grid-column: span 2; }
+  .label { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  .value { font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .tile.big .value { font-size: 44px; }
+  .unit { font-size: 14px; color: var(--muted); font-weight: 400; margin-left: 4px; }
+  details { margin-top: 16px; background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 12px; }
+  summary { font-weight: 600; cursor: pointer; }
+  #log { font: 12px/1.4 ui-monospace, Menlo, monospace; white-space: pre-wrap; word-break: break-all; max-height: 260px; overflow: auto; margin-top: 8px; color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>PM5 BLE Teste</h1>
+  <span id="status">Desconectado</span>
+</header>
+
+<div class="buttons">
+  <button id="btnConnect">Conectar ao PM5</button>
+  <button id="btnDisconnect" class="secondary" disabled>Desconectar</button>
+  <button id="btnDemo" class="secondary">Simular</button>
+</div>
+
+<div class="grid">
+  <div class="tile big"><div class="label">Ritmo /500m</div><div class="value" id="pace">--:--.-</div></div>
+  <div class="tile big"><div class="label">Tempo</div><div class="value" id="time">0:00.0</div></div>
+  <div class="tile"><div class="label">Distância</div><div class="value"><span id="dist">0</span><span class="unit">m</span></div></div>
+  <div class="tile"><div class="label">Voga</div><div class="value"><span id="spm">0</span><span class="unit">spm</span></div></div>
+  <div class="tile"><div class="label">Potência</div><div class="value"><span id="watts">0</span><span class="unit">W</span></div></div>
+  <div class="tile"><div class="label">Calorias</div><div class="value"><span id="cal">0</span><span class="unit">cal</span></div></div>
+  <div class="tile"><div class="label">Ritmo médio</div><div class="value" id="avgpace">--:--.-</div></div>
+  <div class="tile"><div class="label">Remadas</div><div class="value" id="strokes">0</div></div>
+  <div class="tile"><div class="label">Freq. cardíaca</div><div class="value"><span id="hr">--</span><span class="unit">bpm</span></div></div>
+  <div class="tile"><div class="label">Drag factor</div><div class="value" id="drag">--</div></div>
+  <div class="tile big"><div class="label">Estado do treino</div><div class="value" style="font-size:20px" id="wstate">--</div></div>
+</div>
+
+<details>
+  <summary>Log BLE</summary>
+  <div id="log"></div>
+</details>
+
+<script>
+// UUIDs da especificação "Concept2 PM5 Bluetooth Smart Interface Definition"
+const pm = (n) => `ce06${n}-43e5-11e4-916c-0800200c9a66`;
+const SVC_INFO    = pm('0010');
+const SVC_CONTROL = pm('0020');
+const SVC_ROWING  = pm('0030');
+const CH = {
+  generalStatus:     pm('0031'),
+  additionalStatus:  pm('0032'),
+  additionalStatus2: pm('0033'),
+  strokeData:        pm('0035'),
+  additionalStroke:  pm('0036'),
+  workoutSummary:    pm('0039'),
+};
+
+const WORKOUT_STATE = [
+  'Aguardando início', 'Remando', 'Contagem / pausa', 'Intervalo: descanso',
+  'Intervalo: tempo', 'Intervalo: distância', 'Descanso → tempo', 'Descanso → distância',
+  'Tempo → descanso', 'Distância → descanso', 'Treino finalizado', 'Treino encerrado',
+  'Treino registrado', 'Rearmado',
+];
+
+const $ = (id) => document.getElementById(id);
+let device = null;
+let demoTimer = null;
+
+function log(msg) {
+  const line = `[${new Date().toLocaleTimeString()}] ${msg}\n`;
+  const el = $('log');
+  el.textContent = line + el.textContent.slice(0, 8000);
+  console.log(msg);
+}
+
+function setStatus(text, cls = '') {
+  $('status').textContent = text;
+  $('status').className = cls;
+}
+
+// --- helpers de leitura (little-endian) ---
+const u8  = (dv, o) => dv.getUint8(o);
+const u16 = (dv, o) => dv.getUint16(o, true);
+const u24 = (dv, o) => dv.getUint8(o) | (dv.getUint8(o + 1) << 8) | (dv.getUint8(o + 2) << 16);
+
+function fmtTime(sec) {
+  if (!isFinite(sec) || sec <= 0) return '--:--.-';
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = (sec % 60).toFixed(1).padStart(4, '0');
+  return h ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`;
+}
+
+// --- parsers ---
+function onGeneralStatus(dv) {
+  if (dv.byteLength < 19) return;
+  $('time').textContent = fmtTime(u24(dv, 0) / 100);
+  $('dist').textContent = Math.floor(u24(dv, 3) / 10);
+  $('wstate').textContent = WORKOUT_STATE[u8(dv, 8)] ?? `Estado ${u8(dv, 8)}`;
+  $('drag').textContent = u8(dv, 18);
+}
+
+function onAdditionalStatus(dv) {
+  if (dv.byteLength < 11) return;
+  $('spm').textContent = u8(dv, 5);
+  const hr = u8(dv, 6);
+  $('hr').textContent = hr === 255 ? '--' : hr;
+  $('pace').textContent = fmtTime(u16(dv, 7) / 100);
+  $('avgpace').textContent = fmtTime(u16(dv, 9) / 100);
+}
+
+function onAdditionalStatus2(dv) {
+  if (dv.byteLength < 8) return;
+  $('watts').textContent = u16(dv, 4);
+  $('cal').textContent = u16(dv, 6);
+}
+
+function onStrokeData(dv) {
+  if (dv.byteLength < 20) return;
+  $('strokes').textContent = u16(dv, 18);
+}
+
+function onWorkoutSummary(dv) {
+  log(`Resumo do treino recebido (${dv.byteLength} bytes): ${hex(dv)}`);
+}
+
+const hex = (dv) => [...new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength)]
+  .map(b => b.toString(16).padStart(2, '0')).join(' ');
+
+const HANDLERS = {
+  [CH.generalStatus]: onGeneralStatus,
+  [CH.additionalStatus]: onAdditionalStatus,
+  [CH.additionalStatus2]: onAdditionalStatus2,
+  [CH.strokeData]: onStrokeData,
+  [CH.workoutSummary]: onWorkoutSummary,
+};
+
+// --- conexão ---
+async function connect() {
+  if (!navigator.bluetooth) {
+    setStatus('Web Bluetooth indisponível', 'err');
+    log('navigator.bluetooth não existe. No iPhone use o navegador Bluefy; no Android/desktop use Chrome ou Edge, via HTTPS.');
+    return;
+  }
+  stopDemo();
+  try {
+    setStatus('Procurando…');
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ namePrefix: 'PM5' }],
+      optionalServices: [SVC_INFO, SVC_CONTROL, SVC_ROWING],
+    });
+    log(`Dispositivo selecionado: ${device.name} (${device.id})`);
+    device.addEventListener('gattserverdisconnected', onDisconnected);
+
+    setStatus('Conectando…');
+    const server = await device.gatt.connect();
+    log('GATT conectado');
+
+    await readDeviceInfo(server);
+
+    const rowing = await server.getPrimaryService(SVC_ROWING);
+    log('Serviço de remo encontrado');
+
+    for (const [uuid, handler] of Object.entries(HANDLERS)) {
+      try {
+        const ch = await rowing.getCharacteristic(uuid);
+        ch.addEventListener('characteristicvaluechanged', (e) => {
+          handler(e.target.value);
+        });
+        await ch.startNotifications();
+        log(`Notificações ativas: ${uuid.slice(4, 8)}`);
+      } catch (err) {
+        log(`Falha em ${uuid.slice(4, 8)}: ${err.message}`);
+      }
+    }
+
+    setStatus(`Conectado: ${device.name}`, 'ok');
+    $('btnConnect').disabled = true;
+    $('btnDisconnect').disabled = false;
+  } catch (err) {
+    setStatus('Erro', 'err');
+    log(`Erro: ${err.name}: ${err.message}`);
+  }
+}
+
+async function readDeviceInfo(server) {
+  try {
+    const info = await server.getPrimaryService(SVC_INFO);
+    const fields = { '0012': 'Serial', '0013': 'Hardware', '0014': 'Firmware' };
+    const dec = new TextDecoder();
+    for (const [n, label] of Object.entries(fields)) {
+      try {
+        const v = await (await info.getCharacteristic(pm(n))).readValue();
+        log(`${label}: ${dec.decode(v).replace(/\0/g, '')}`);
+      } catch { /* opcional */ }
+    }
+  } catch (err) {
+    log(`Info do dispositivo indisponível: ${err.message}`);
+  }
+}
+
+function onDisconnected() {
+  setStatus('Desconectado', 'err');
+  log('PM5 desconectou');
+  $('btnConnect').disabled = false;
+  $('btnDisconnect').disabled = true;
+}
+
+function disconnect() {
+  if (device?.gatt?.connected) device.gatt.disconnect();
+}
+
+// --- modo simulação (gera pacotes no mesmo formato do PM5 para testar a tela) ---
+function startDemo() {
+  if (demoTimer) return stopDemo();
+  $('btnDemo').textContent = 'Parar simulação';
+  setStatus('Simulando', 'ok');
+  let t = 0, d = 0, strokes = 0;
+  demoTimer = setInterval(() => {
+    t += 0.5;
+    const pace = 120 + Math.sin(t / 10) * 6;          // ~2:00/500m
+    d += 0.5 * (500 / pace);
+    if (t % 2 === 0) strokes++;
+    const watts = Math.round(2.8 / Math.pow(pace / 500, 3));
+
+    const g = new DataView(new ArrayBuffer(19));
+    put24(g, 0, Math.round(t * 100)); put24(g, 3, Math.round(d * 10));
+    g.setUint8(8, 1); g.setUint8(18, 120);
+    onGeneralStatus(g);
+
+    const a = new DataView(new ArrayBuffer(17));
+    a.setUint8(5, 24 + Math.round(Math.sin(t) * 2)); a.setUint8(6, 145);
+    a.setUint16(7, Math.round(pace * 100), true); a.setUint16(9, Math.round(121 * 100), true);
+    onAdditionalStatus(a);
+
+    const a2 = new DataView(new ArrayBuffer(20));
+    a2.setUint16(4, watts, true); a2.setUint16(6, Math.round(t / 6), true);
+    onAdditionalStatus2(a2);
+
+    const s = new DataView(new ArrayBuffer(20));
+    s.setUint16(18, strokes, true);
+    onStrokeData(s);
+  }, 500);
+}
+
+function stopDemo() {
+  if (!demoTimer) return;
+  clearInterval(demoTimer);
+  demoTimer = null;
+  $('btnDemo').textContent = 'Simular';
+  setStatus('Desconectado');
+}
+
+function put24(dv, o, v) {
+  dv.setUint8(o, v & 0xff); dv.setUint8(o + 1, (v >> 8) & 0xff); dv.setUint8(o + 2, (v >> 16) & 0xff);
+}
+
+$('btnConnect').addEventListener('click', connect);
+$('btnDisconnect').addEventListener('click', disconnect);
+$('btnDemo').addEventListener('click', startDemo);
+
+if (!navigator.bluetooth) log('Aviso: este navegador não suporta Web Bluetooth (use Bluefy no iPhone).');
+</script>
+</body>
+</html>
